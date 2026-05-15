@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model ServiceCategory {
+  id           String        @id @default(cuid())
+  name         String        @unique
+  slug         String        @unique
+  description  String?
+  isActive     Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  proposals    Proposal[]
+  pricingRules PricingRule[]
+  addOns       AddOn[]
+}
+
+model PricingRule {
+  id          String          @id @default(cuid())
+  categoryId  String
+  category    ServiceCategory @relation(fields: [categoryId], references: [id])
+  key         String
+  label       String
+  type        String
+  value       Float
+  unit        String?
+  condition   String?
+  description String?
+  isActive    Boolean         @default(true)
+  sortOrder   Int             @default(0)
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@unique([categoryId, key])
+}
+
+model AddOn {
+  id             String          @id @default(cuid())
+  categoryId     String
+  category       ServiceCategory @relation(fields: [categoryId], references: [id])
+  key            String
+  name           String
+  description    String?
+  price          Float
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  proposalAddOns ProposalAddOn[]
+
+  @@unique([categoryId, key])
+}
+
+model Proposal {
+  id                String           @id @default(cuid())
+  categoryId        String
+  category          ServiceCategory  @relation(fields: [categoryId], references: [id])
+  clientDescription String
+  budget            Float?
+  timeline          String?
+  complexity        String?
+  status            String           @default("draft")
+  extractionResult  ExtractionResult?
+  packages          ProposalPackage[]
+  addOns            ProposalAddOn[]
+  versions          ProposalVersion[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+model ExtractionResult {
+  id            String   @id @default(cuid())
+  proposalId    String   @unique
+  proposal      Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  extractedData String
+  confidence    Float    @default(0)
+  ambiguities   String?
+  reasoning     String?
+  model         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model ProposalPackage {
+  id          String   @id @default(cuid())
+  proposalId  String
+  proposal    Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  type        String
+  name        String
+  description String?
+  features    String
+  breakdown   String
+  subtotal    Float
+  multiplier  Float    @default(1.0)
+  total       Float
+  timeline    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ProposalAddOn {
+  id         String   @id @default(cuid())
+  proposalId String
+  proposal   Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  addOnId    String
+  addOn      AddOn    @relation(fields: [addOnId], references: [id])
+  selected   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model ProposalVersion {
+  id         String   @id @default(cuid())
+  proposalId String
+  proposal   Proposal @relation(fields: [proposalId], references: [id], onDelete: Cascade)
+  version    Int
+  snapshot   String
+  createdAt  DateTime @default(now())
+}
+
+model Analytics {
+  id        String   @id @default(cuid())
+  event     String
+  data      String?
+  createdAt DateTime @default(now())
+}
