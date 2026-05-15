@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import { calculatePricing, generatePackageFeatures, type ExtractionInputs } from "@/lib/pricing/engine";
+import { CATEGORY_SCHEMAS, CATEGORY_DEFAULTS } from "@/lib/ai/schemas";
 import { z } from "zod";
 
 const GeneratePricingSchema = z.object({
@@ -26,7 +27,11 @@ export async function POST(req: NextRequest) {
 
   if (!category) return NextResponse.json({ error: "Category not found" }, { status: 404 });
 
-  const inputs = extractedData as unknown as ExtractionInputs;
+  // Coerce inputs through the category's Zod schema so AI-returned strings become proper types
+  const schema = CATEGORY_SCHEMAS[categorySlug];
+  const defaults = CATEGORY_DEFAULTS[categorySlug] ?? {};
+  const coerced = schema ? schema.safeParse(extractedData) : null;
+  const inputs = (coerced?.success ? coerced.data : { ...defaults, ...extractedData }) as unknown as ExtractionInputs;
 
   const standardBreakdown = calculatePricing(category.pricingRules, inputs, "standard");
   const premiumBreakdown = calculatePricing(category.pricingRules, inputs, "premium");

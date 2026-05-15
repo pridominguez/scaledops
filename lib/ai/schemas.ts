@@ -1,40 +1,77 @@
 import { z } from "zod";
 
+// Use z.coerce so we accept string values from the AI (e.g. "12", "true")
+const num = (min: number, max: number) =>
+  z.coerce.number().int().min(min).max(max);
+const numFloat = (min: number, max: number) =>
+  z.coerce.number().min(min).max(max);
+const bool = () =>
+  z.preprocess((v) => {
+    if (typeof v === "boolean") return v;
+    if (typeof v === "string") {
+      const s = v.toLowerCase().trim();
+      if (s === "true" || s === "yes" || s === "1") return true;
+      if (s === "false" || s === "no" || s === "0" || s === "") return false;
+      // Anything non-empty/unknown → treat as true (e.g. "advanced", "required")
+      return true;
+    }
+    if (typeof v === "number") return v !== 0;
+    return false;
+  }, z.boolean());
+
+const researchEnum = z.preprocess((v) => {
+  if (typeof v !== "string") return v;
+  const s = v.toLowerCase().trim();
+  if (["high", "deep", "extensive", "in-depth", "thorough"].some((x) => s.includes(x))) return "high";
+  if (["medium", "moderate", "standard"].some((x) => s.includes(x))) return "medium";
+  if (["low", "light", "basic", "minimal"].some((x) => s.includes(x))) return "low";
+  return s;
+}, z.enum(["low", "medium", "high"]));
+
+const editingEnum = z.preprocess((v) => {
+  if (typeof v !== "string") return v;
+  const s = v.toLowerCase().trim();
+  if (["high", "complex", "advanced", "heavy"].some((x) => s.includes(x))) return "high";
+  if (["medium", "moderate", "intermediate"].some((x) => s.includes(x))) return "medium";
+  if (["simple", "basic", "light", "low"].some((x) => s.includes(x))) return "simple";
+  return s;
+}, z.enum(["simple", "medium", "high"]));
+
 export const BlogWritingSchema = z.object({
-  wordCount: z.number().int().min(100).max(10000).describe("Target word count for the article"),
-  seoOptimized: z.boolean().describe("Whether SEO optimization is required"),
-  researchDepth: z.enum(["low", "medium", "high"]).describe("Depth of research required"),
-  technicalComplexity: z.boolean().describe("Whether the topic is highly technical"),
-  interviewsRequired: z.boolean().describe("Whether expert interviews are needed"),
-  turnaroundDays: z.number().int().min(1).max(60).describe("Number of days for delivery"),
-  revisions: z.number().int().min(0).max(10).describe("Number of revision rounds included"),
+  wordCount: num(100, 10000),
+  seoOptimized: bool(),
+  researchDepth: researchEnum,
+  technicalComplexity: bool(),
+  interviewsRequired: bool(),
+  turnaroundDays: num(1, 60),
+  revisions: num(0, 10),
 });
 
 export const WebsiteDevelopmentSchema = z.object({
-  pageCount: z.number().int().min(1).max(100).describe("Number of pages in the website"),
-  cmsRequired: z.boolean().describe("Whether a CMS is needed"),
-  customDesign: z.boolean().describe("Whether custom design is required (not a template)"),
-  animations: z.boolean().describe("Whether advanced animations are required"),
-  authentication: z.boolean().describe("Whether user auth/login is needed"),
-  dashboard: z.boolean().describe("Whether an admin dashboard is needed"),
-  integrationsCount: z.number().int().min(0).max(20).describe("Number of third-party integrations"),
-  seo: z.boolean().describe("Whether technical SEO optimization is included"),
-  ecommerce: z.boolean().describe("Whether e-commerce functionality is needed"),
-  timelineWeeks: z.number().int().min(1).max(52).describe("Timeline in weeks"),
-  revisions: z.number().int().min(0).max(10).describe("Number of revision rounds"),
+  pageCount: num(1, 100),
+  cmsRequired: bool(),
+  customDesign: bool(),
+  animations: bool(),
+  authentication: bool(),
+  dashboard: bool(),
+  integrationsCount: num(0, 20),
+  seo: bool(),
+  ecommerce: bool(),
+  timelineWeeks: num(1, 52),
+  revisions: num(0, 10),
 });
 
 export const VideoProductionSchema = z.object({
-  durationMinutes: z.number().min(0.5).max(120).describe("Final video duration in minutes"),
-  shootingDays: z.number().int().min(0).max(30).describe("Number of days of shooting"),
-  actorsCount: z.number().int().min(0).max(20).describe("Number of on-screen actors/talent"),
-  motionGraphics: z.boolean().describe("Whether motion graphics are needed"),
-  editingComplexity: z.enum(["simple", "medium", "high"]).describe("Complexity of editing required"),
-  scriptWriting: z.boolean().describe("Whether script writing is needed"),
-  voiceOver: z.boolean().describe("Whether voice-over is needed"),
-  subtitles: z.boolean().describe("Whether subtitles or captions are needed"),
-  deliveryDays: z.number().int().min(1).max(90).describe("Number of days for delivery"),
-  revisions: z.number().int().min(0).max(10).describe("Number of revision rounds"),
+  durationMinutes: numFloat(0.5, 120),
+  shootingDays: num(0, 30),
+  actorsCount: num(0, 20),
+  motionGraphics: bool(),
+  editingComplexity: editingEnum,
+  scriptWriting: bool(),
+  voiceOver: bool(),
+  subtitles: bool(),
+  deliveryDays: num(1, 90),
+  revisions: num(0, 10),
 });
 
 export type BlogWritingExtraction = z.infer<typeof BlogWritingSchema>;

@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 import { z } from "zod";
 import {
   BlogWritingSchema,
@@ -29,13 +29,24 @@ CRITICAL RULES:
 - Flag any fields you are uncertain about in the ambiguities list
 - Provide honest confidence scores (0.0 to 1.0) based on how clearly the description specifies requirements
 
-Category: ${categorySlug}`;
+Category: ${categorySlug}
+
+Return your output as a valid JSON object with this exact shape:
+{
+  "data": { ...extracted fields per the schema... },
+  "confidence": 0.0-1.0,
+  "ambiguities": ["list of ambiguous fields or aspects"],
+  "reasoning": "brief explanation of extraction decisions"
+}`;
 }
 
-// Zod v4 compatible schema introspection
-function zodSchemaToJsonSchema(schema: z.ZodObject<z.ZodRawShape>): object {
+function zodSchemaToGeminiSchema(schema: z.ZodObject<z.ZodRawShape>): {
+  type: SchemaType;
+  properties: Record<string, { type: SchemaType; enum?: string[]; description?: string }>;
+  required: string[];
+} {
   const shape = schema.shape;
-  const properties: Record<string, unknown> = {};
+  const properties: Record<string, { type: SchemaType; enum?: string[]; description?: string }> = {};
   const required: string[] = [];
 
   for (const [key, value] of Object.entries(shape)) {
@@ -43,91 +54,116 @@ function zodSchemaToJsonSchema(schema: z.ZodObject<z.ZodRawShape>): object {
     const def = (value as unknown as { _def: { typeName: string; description?: string; values?: unknown[] } })._def;
 
     if (def.typeName === "ZodNumber") {
-      properties[key] = { type: "number" };
+      properties[key] = { type: SchemaType.NUMBER };
     } else if (def.typeName === "ZodBoolean") {
-      properties[key] = { type: "boolean" };
+      properties[key] = { type: SchemaType.BOOLEAN };
     } else if (def.typeName === "ZodEnum" || def.typeName === "ZodNativeEnum") {
       const opts = Array.isArray(def.values) ? def.values : Object.values(def.values ?? {});
-      properties[key] = { type: "string", enum: opts };
+      properties[key] = { type: SchemaType.STRING, enum: opts.map(String) };
     } else {
-      properties[key] = { type: "string" };
+      properties[key] = { type: SchemaType.STRING };
     }
   }
 
-  return { type: "object", properties, required };
+  return { type: SchemaType.OBJECT, properties, required };
 }
 
-async function extractWithAnthropic<T>(
+async function extractWithGemini<T>(
   categorySlug: string,
   description: string,
   schema: z.ZodObject<z.ZodRawShape>,
   defaults: T
 ): Promise<ExtractionOutput<T>> {
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const apiKey = process.env.GOOGLE_AI_API_KEY ?? process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    return {
+      data: defaults,
+      confidence: 0.5,
+      ambiguities: ["API key not configured — using defaults"],
+      reasoning: "No AI key configured",
+      model: "none",
+    };
+  }
 
-  const dataSchema = zodSchemaToJsonSchema(schema);
+  const genAI = new GoogleGenerativeAI(apiKey);
 
-  const tools: Anthropic.Tool[] = [
-    {
-      name: "extract_project_requirements",
-      description: "Extract structured project requirements from the description",
-      input_schema: {
-        type: "object" as const,
-        properties: {
-          data: dataSchema,
-          confidence: {
-            type: "number",
-            description: "Overall confidence score 0.0-1.0 for the extraction quality",
-          },
-          ambiguities: {
-            type: "array",
-            items: { type: "string" },
-            description: "List of fields or aspects that were ambiguous or unclear",
-          },
-          reasoning: {
-            type: "string",
-            description: "Brief explanation of your extraction decisions",
-          },
-        },
-        required: ["data", "confidence", "ambiguities", "reasoning"],
-      },
+  const dataSchema = zodSchemaToGeminiSchema(schema);
+
+  const responseSchema = {
+    type: SchemaType.OBJECT,
+    properties: {
+      data: dataSchema,
+      confidence: { type: SchemaType.NUMBER },
+      ambiguities: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+      reasoning: { type: SchemaType.STRING },
     },
-  ];
-
-  const response = await client.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1024,
-    system: buildSystemPrompt(categorySlug),
-    tools,
-    tool_choice: { type: "any" },
-    messages: [
-      {
-        role: "user",
-        content: `Extract project requirements from this description:\n\n"${description}"`,
-      },
-    ],
-  });
-
-  const toolUse = response.content.find((c): c is Anthropic.ToolUseBlock => c.type === "tool_use");
-  if (!toolUse) throw new Error("No tool use in response");
-
-  const raw = toolUse.input as {
-    data: unknown;
-    confidence: number;
-    ambiguities: string[];
-    reasoning: string;
+    required: ["data", "confidence", "ambiguities", "reasoning"],
   };
 
-  const merged = { ...defaults, ...(raw.data as Partial<T>) };
-  const parsed = schema.safeParse(merged);
-  const finalData = parsed.success ? (parsed.data as T) : merged;
+  const MODELS = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"];
 
+  for (const modelName of MODELS) {
+    try {
+      const model = genAI.getGenerativeModel({
+        model: modelName,
+        systemInstruction: buildSystemPrompt(categorySlug),
+        generationConfig: {
+          responseMimeType: "application/json",
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          responseSchema: responseSchema as any,
+          temperature: 0.2,
+        },
+      });
+
+      const result = await model.generateContent(
+        `Extract project requirements from this description:\n\n"${description}"`
+      );
+
+      const text = result.response.text();
+      const raw = JSON.parse(text) as {
+        data: unknown;
+        confidence: number;
+        ambiguities: string[];
+        reasoning: string;
+      };
+
+      // Coerce raw AI data through Zod, then merge with defaults for any missing fields
+      const coerced = schema.safeParse(raw.data);
+      const finalData: T = coerced.success
+        ? (coerced.data as T)
+        : ({ ...defaults, ...(raw.data as Partial<T>) } as T);
+
+      return {
+        data: finalData,
+        confidence: raw.confidence ?? 0.7,
+        ambiguities: raw.ambiguities ?? [],
+        reasoning: raw.reasoning ?? "",
+        model: modelName,
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[extraction] ${modelName} failed: ${message.substring(0, 200)}`);
+      // Try next model only on rate-limit / quota errors
+      if (!message.includes("429") && !message.includes("quota") && !message.includes("RATE_LIMIT")) {
+        // Non-quota error — fall back to defaults
+        return {
+          data: defaults,
+          confidence: 0.4,
+          ambiguities: [`AI extraction failed: ${message.substring(0, 120)} — review defaults manually`],
+          reasoning: "Extraction error; defaults shown",
+          model: "fallback",
+        };
+      }
+    }
+  }
+
+  // All models exhausted quota
   return {
-    data: finalData,
-    confidence: raw.confidence ?? 0.7,
-    ambiguities: raw.ambiguities ?? [],
-    reasoning: raw.reasoning ?? "",
-    model: "claude-sonnet-4-6",
+    data: defaults,
+    confidence: 0.4,
+    ambiguities: ["Gemini quota exhausted across all models — using defaults. Edit fields below."],
+    reasoning: "All Gemini models are rate-limited. Please review and adjust the defaults below.",
+    model: "fallback-quota",
   };
 }
 
@@ -135,30 +171,21 @@ export async function extractBlogWriting(
   description: string
 ): Promise<ExtractionOutput<BlogWritingExtraction>> {
   const defaults = CATEGORY_DEFAULTS["blog-writing"] as BlogWritingExtraction;
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return { data: defaults, confidence: 0.5, ambiguities: ["API key not configured — using defaults"], reasoning: "No AI key configured", model: "none" };
-  }
-  return extractWithAnthropic("blog-writing", description, BlogWritingSchema, defaults);
+  return extractWithGemini("blog-writing", description, BlogWritingSchema, defaults);
 }
 
 export async function extractWebsiteDevelopment(
   description: string
 ): Promise<ExtractionOutput<WebsiteDevelopmentExtraction>> {
   const defaults = CATEGORY_DEFAULTS["website-development"] as WebsiteDevelopmentExtraction;
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return { data: defaults, confidence: 0.5, ambiguities: ["API key not configured — using defaults"], reasoning: "No AI key configured", model: "none" };
-  }
-  return extractWithAnthropic("website-development", description, WebsiteDevelopmentSchema, defaults);
+  return extractWithGemini("website-development", description, WebsiteDevelopmentSchema, defaults);
 }
 
 export async function extractVideoProduction(
   description: string
 ): Promise<ExtractionOutput<VideoProductionExtraction>> {
   const defaults = CATEGORY_DEFAULTS["video-production"] as VideoProductionExtraction;
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return { data: defaults, confidence: 0.5, ambiguities: ["API key not configured — using defaults"], reasoning: "No AI key configured", model: "none" };
-  }
-  return extractWithAnthropic("video-production", description, VideoProductionSchema, defaults);
+  return extractWithGemini("video-production", description, VideoProductionSchema, defaults);
 }
 
 export async function extractProjectRequirements(
